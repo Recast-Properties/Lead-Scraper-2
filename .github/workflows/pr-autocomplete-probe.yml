@@ -1,33 +1,43 @@
 name: PropertyReach Autocomplete Probe
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # run manually from the Actions tab
 
 jobs:
   probe:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests
-      - name: Call autocomplete (Portland)
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Call suggestions endpoint (Portland)
         env:
           PR_API_KEY: ${{ secrets.PR_API_KEY }}
         run: |
           python - <<'PY'
-          import os, requests, json, sys
+          import os, json, requests, sys
           key = os.getenv("PR_API_KEY")
           if not key:
-              print("Missing PR_API_KEY"); sys.exit(1)
+            print("Missing PR_API_KEY"); sys.exit(1)
+
+          url = "https://api.propertyreach.com/v1/suggestions"  # documented suggestions endpoint
           headers = {"x-api-key": key, "Content-Type": "application/json"}
-          # If this endpoint name differs, we’ll see a 404/405 which still proves the key is accepted/rejected.
-          url = "https://api.propertyreach.com/v1/autocomplete"
           body = {"query": "Portland OR", "limit": 5}
+
           r = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
           print("Status:", r.status_code)
           try:
-              print("JSON:", json.dumps(r.json(), indent=2)[:2000])
+              data = r.json()
+              print("JSON:", json.dumps(data, indent=2)[:2000])
           except Exception:
               print("Text:", r.text[:2000])
           PY
