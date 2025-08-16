@@ -80,3 +80,31 @@ jobs:
                   "Source": "test",
                   "Title": title,
                   "URL": url,
+                  "Price": price,
+                  "Neighborhood": hood,
+                  "Address": addr,
+                  "Description": desc,
+                  "Score": score,
+              }
+              if INCFLAG and flags is not None:
+                  fields["Flags"] = flags
+              return {"fields": fields}
+
+          records = [
+              rec("Test Lead A — Fixer in SE Portland", "https://example.com/test-a", "$275,000", "SE Portland",
+                  "123 Test St, Portland, OR", "Dummy record to verify Airtable connection.", 7,
+                  "as-is/fixer"),
+              rec("Test Lead B — Tenant issues", "https://example.com/test-b", "$315,000", "NE Portland",
+                  "456 Sample Ave, Portland, OR", "Dummy record to verify Airtable connection.", 6,
+                  "eviction/tenant-wont-pay"),
+              rec("Test Lead C — Vacant & needs work", "https://example.com/test-c", "$199,000", "Gresham",
+                  "789 Demo Blvd, Gresham, OR", "Dummy record to verify Airtable connection.", 8,
+                  "vacant/needs-work"),
+          ]
+
+          payload = {"records": records, "typecast": True}
+          r = requests.post(base_url, headers=headers, data=json.dumps(payload), timeout=30)
+          print("Insert status:", r.status_code)
+          print("Response:", r.json())
+          sys.exit(0 if r.status_code < 300 else 1)
+          PY
