@@ -14,6 +14,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: |
+          pip install requests
+
       - name: Push 3 test rows (matches your Leads schema)
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
@@ -40,72 +44,39 @@ jobs:
           headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
           def list_ids():
-            ids = []
-            url = base_url
-            while True:
-              r = requests.get(url, headers=headers, timeout=30)
-              if r.status_code >= 300:
-                print("List error:", r.status_code, r.text); sys.exit(1)
-              data = r.json()
-              ids.extend([rec["id"] for rec in data.get("records", [])])
-              offset = data.get("offset")
-              if not offset: break
-              url = f"{base_url}?offset={offset}"
-            return ids
+              ids = []
+              url = base_url
+              while True:
+                  r = requests.get(url, headers=headers, timeout=30)
+                  if r.status_code >= 300:
+                      print("List error:", r.status_code, r.text); sys.exit(1)
+                  data = r.json()
+                  ids.extend([rec["id"] for rec in data.get("records", [])])
+                  offset = data.get("offset")
+                  if not offset: break
+                  url = f"{base_url}?offset={offset}"
+              return ids
 
           def delete_batch(ids):
-            if not ids: return
-            # DELETE /v0/{base}/{table}?records[]=rec1&records[]=rec2 ...
-            params = "&".join(f"records[]={urllib.parse.quote(i)}" for i in ids)
-            url = f"{base_url}?{params}"
-            r = requests.delete(url, headers=headers, timeout=30)
-            if r.status_code >= 300:
-              print("Delete error:", r.status_code, r.text); sys.exit(1)
+              if not ids: return
+              params = "&".join(f"records[]={urllib.parse.quote(i)}" for i in ids)
+              url = f"{base_url}?{params}"
+              r = requests.delete(url, headers=headers, timeout=30)
+              if r.status_code >= 300:
+                  print("Delete error:", r.status_code, r.text); sys.exit(1)
 
           if CLEAR:
-            print("Clearing Airtable table...")
-            ids = list_ids()
-            for i in range(0, len(ids), 10):
-              delete_batch(ids[i:i+10])
-              time.sleep(0.2)
-            print("All records cleared.")
+              print("Clearing Airtable table...")
+              ids = list_ids()
+              for i in range(0, len(ids), 10):
+                  delete_batch(ids[i:i+10])
+                  time.sleep(0.2)
+              print("All records cleared.")
 
           today = datetime.date.today().isoformat()
           def rec(title, url, price, hood, addr, desc, score, flags=None):
-            fields = {
-              "Date Found": today,
-              "Source": "test",
-              "Title": title,
-              "URL": url,
-              "Price": price,
-              "Neighborhood": hood,
-              "Address": addr,
-              "Description": desc,
-              "Score": score,
-            }
-            if INCFLAG and flags is not None:
-              fields["Flags"] = flags
-            return {"fields": fields}
-
-          records = [
-            rec("Test Lead A — Fixer in SE Portland", "https://example.com/test-a", "$275,000", "SE Portland",
-                "123 Test St, Portland, OR", "Dummy record to verify Airtable connection.", 7,
-                "as-is/fixer"),
-            rec("Test Lead B — Tenant issues", "https://example.com/test-b", "$315,000", "NE Portland",
-                "456 Sample Ave, Portland, OR", "Dummy record to verify Airtable connection.", 6,
-                "eviction/tenant-wont-pay"),
-            rec("Test Lead C — Vacant & needs work", "https://example.com/test-c", "$199,000", "Gresham",
-                "789 Demo Blvd, Gresham, OR", "Dummy record to verify Airtable connection.", 8,
-                "vacant/needs-work"),
-          ]
-
-          payload = {"records": records, "typecast": True}
-          r = requests.post(base_url, headers=headers, data=json.dumps(payload), timeout=30)
-          print("Insert status:", r.status_code)
-          try:
-            print("Response:", r.json())
-          except Exception:
-            print("Response text:", r.text)
-
-          sys.exit(0 if r.status_code < 300 else 1)
-          PY
+              fields = {
+                  "Date Found": today,
+                  "Source": "test",
+                  "Title": title,
+                  "URL": url,
