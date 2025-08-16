@@ -1,9 +1,9 @@
-name: PropertyReach → Airtable (Portland distressed) [DEBUG]
+name: PropertyReach → Airtable [Multi-Variant Debug]
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "25 13 * * *"   # ~6:25am PT (DST). Adjust later.
+    - cron: "25 13 * * *"   # ~6:25am PT during DST
 
 jobs:
   pr-to-airtable:
@@ -20,7 +20,7 @@ jobs:
       - name: Install requests
         run: pip install requests
 
-      - name: Fetch from PropertyReach (debug), score, and push to Airtable
+      - name: Query PropertyReach (3 variants), map, and push to Airtable
         env:
           PR_API_KEY: ${{ secrets.PR_API_KEY }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
@@ -28,159 +28,150 @@ jobs:
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
           CITY: "Portland"
           STATE: "OR"
-          LIMIT: "100"
-          DAYS_ON_MARKET_MIN: "0"     # debug: no DOM floor
-          WANT_VACANT: "false"        # debug: do not constrain
-          WANT_TAX_DELINQUENT: "false"
-          WANT_PRICE_REDUCED: "false"
-          MIN_SCORE: "0"              # debug: push everything returned
+          LIMIT: "50"
+          MIN_SCORE: "0"
         run: |
           python - <<'PY'
           import os, json, requests, datetime, sys, time, urllib.parse
 
           PR_KEY = os.getenv("PR_API_KEY")
-          CITY = os.getenv("CITY", "Portland")
-          STATE = os.getenv("STATE", "OR")
-          LIMIT = int(os.getenv("LIMIT", "100"))
-          dom_min = int(os.getenv("DAYS_ON_MARKET_MIN", "0"))
-          want_vacant = os.getenv("WANT_VACANT","false").lower()=="true"
-          want_tax = os.getenv("WANT_TAX_DELINQUENT","false").lower()=="true"
-          want_price_drop = os.getenv("WANT_PRICE_REDUCED","false").lower()=="true"
-          min_score = int(os.getenv("MIN_SCORE","0"))
-
           AT_KEY = os.getenv("AIRTABLE_API_KEY")
           AT_BASE = os.getenv("AIRTABLE_BASE_ID")
-          AT_TABLE = os.getenv("AIRTABLE_TABLE_NAME","Leads")
+          AT_TABLE = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
+          CITY = os.getenv("CITY","Portland")
+          STATE = os.getenv("STATE","OR")
+          LIMIT = int(os.getenv("LIMIT","50"))
+          MIN_SCORE = int(os.getenv("MIN_SCORE","0"))
 
-          if not(PR_KEY and AT_KEY and AT_BASE and AT_TABLE):
-              print("Missing one or more secrets (PR_API_KEY / AIRTABLE_*)."); sys.exit(1)
+          if not (PR_KEY and AT_KEY and AT_BASE and AT_TABLE):
+              print("Missing PR_API_KEY or Airtable secrets."); sys.exit(1)
 
           pr_url = "https://api.propertyreach.com/v1/search"
           headers = {"x-api-key": PR_KEY, "Content-Type": "application/json"}
 
-          body = {
+          def call_and_parse(label, body):
+              print(f"\n=== VARIANT {label} ===")
+              print("[REQUEST]", json.dumps(body, indent=2)[:1000])
+              r = requests.post(pr_url, headers=headers, data=json.dumps(body), timeout=60)
+              print("[STATUS]", r.status_code)
+              try:
+                  data = r.json()
+              except Exception:
+                  print("[RAW RESPONSE]", r.text[:2000])
+                  return []
+              print("[TOP-LEVEL KEYS]", list(data.keys()) if isinstance(data, dict) else type(data))
+              # Accept common containers
+              props = []
+              if isinstance(data, dict):
+                  for key in ("properties","results"):
+                      if isinstance(data.get(key), list):
+                          props = data[key]; break
+                  if not props and isinstance(data.get("data"), dict):
+                      dd = data["data"]
+                      for key in ("properties","results"):
+                          if isinstance(dd.get(key), list):
+                              props = dd[key]; break
+              elif isinstance(data, list):
+                  props = data
+              print("[COUNT]", len(props))
+              if props:
+                  print("[FIRST ITEM KEYS]", list(props[0].keys()))
+                  print("[FIRST ITEM EXCERPT]", json.dumps(props[0], default=str)[:800])
+              return props
+
+          # Variant A: city/state filter
+          varA = {
             "city": CITY,
             "state": STATE,
             "filter": {
-              "daysOnMarketMin": dom_min,
-              # only include a filter if True, else omit it
-              "vacant": True if want_vacant else None,
-              "taxDelinquency": True if want_tax else None,
-              "priceReduced": True if want_price_drop else None,
+              # intentionally minimal; add others later when we know shape
             },
             "options": {"limit": LIMIT}
           }
-          body["filter"] = {k:v for k,v in body["filter"].items() if v is not None}
 
-          print("[DEBUG] Request body:")
-          print(json.dumps(body, indent=2))
+          # Variant B: single location string (some APIs prefer 'location' or 'query')
+          varB = {
+            "location": f"{CITY}, {STATE}",
+            "options": {"limit": LIMIT}
+          }
 
-          r = requests.post(pr_url, headers=headers, data=json.dumps(body), timeout=60)
-          print("[DEBUG] PR status:", r.status_code)
-          try:
-              data = r.json()
-          except Exception:
-              print("[DEBUG] Non-JSON response:", r.text[:1000])
-              sys.exit(1)
+          # Variant C: no location filters, just a limit (to test if key/environment works)
+          varC = {
+            "options": {"limit": LIMIT}
+          }
 
-          # Inspect top-level keys
-          print("[DEBUG] PR top-level keys:", list(data.keys()))
+          all_rows = []
+          labels = []
+          for label, body in (("A city/state", varA), ("B location", varB), ("C minimal", varC)):
+              props = call_and_parse(label, body)
+              if not props:
+                  continue
+              labels.append(label)
+              # generic mapper (we’ll refine after we see keys)
+              def val(x, default=""):
+                  return default if x is None else x
+              def as_price(v):
+                  try:
+                      return f"${int(float(v)):,}"
+                  except: return ""
+              def score(p):
+                  s=0; flags=[]
+                  for k in ("vacant","taxDelinquency","priceReduced"):
+                      if p.get(k) is True: s+=2; flags.append(k)
+                  try:
+                      dom=int(p.get("daysOnMarket") or 0)
+                      if dom>=0: s+=1; flags.append(f"DOM={dom}")
+                  except: pass
+                  try:
+                      eq=float(p.get("estimatedEquityRatio") or 0.0)
+                      if eq>=0.3: s+=1; flags.append("equity>=30%")
+                  except: pass
+                  return min(s,10), ",".join(flags)
 
-          # Try common containers: 'properties' or 'results'
-          props = []
-          if isinstance(data.get("properties"), list):
-              props = data["properties"]
-          elif isinstance(data.get("results"), list):
-              props = data["results"]
-          elif isinstance(data, list):
-              props = data
-          else:
-              # try nested 'data' key
-              if isinstance(data.get("data"), dict):
-                  if isinstance(data["data"].get("properties"), list):
-                      props = data["data"]["properties"]
-                  elif isinstance(data["data"].get("results"), list):
-                      props = data["data"]["results"]
+              today = datetime.date.today().isoformat()
+              for p in props:
+                  street = p.get("streetAddress") or p.get("address") or ""
+                  city = p.get("city") or CITY
+                  state = p.get("state") or STATE
+                  zipc = p.get("zip") or p.get("zipcode") or ""
+                  title = ", ".join([x for x in [street, city, state, zipc] if x])
+                  price = as_price(p.get("estimatedValue") or p.get("valuation"))
+                  s, flags = score(p)
+                  all_rows.append({
+                    "Date Found": today,
+                    "Source": f"PropertyReach [{label}]",
+                    "Title": title or "PropertyReach Lead",
+                    "URL": f"PR:{p.get('id') or p.get('propertyId') or ''}",
+                    "Price": price,
+                    "Neighborhood": val(p.get("subdivision") or p.get("neighborhood") or p.get("landUse") or ""),
+                    "Address": title,
+                    "Description": f"status={val(p.get('listingStatus'))}, DOM={val(p.get('daysOnMarket',0))}",
+                    "Score": s,
+                    "Flags": flags,
+                  })
 
-          print(f"[DEBUG] Count from PR: {len(props)}")
-          if props:
-              print("[DEBUG] First record keys:", list(props[0].keys()))
-
-          # map/score
-          today = datetime.date.today().isoformat()
-          def val(x, default=""):
-              return default if x is None else x
-
-          def as_price(v):
-              try:
-                  return f"${int(float(v)):,}"
-              except:
-                  return ""
-
-          def score_row(p):
-              s=0; flags=[]
-              if p.get("vacant") is True: s+=2; flags.append("vacant")
-              if p.get("taxDelinquency") is True: s+=2; flags.append("tax_delinquent")
-              if p.get("priceReduced") is True: s+=2; flags.append("price_reduced")
-              try:
-                  dom=int(p.get("daysOnMarket") or 0)
-                  if dom>=dom_min: s+=1; flags.append(f"DOM>={dom_min}")
-              except: pass
-              try:
-                  eq=float(p.get("estimatedEquityRatio") or 0.0)
-                  if eq>=0.3: s+=1; flags.append("equity>=30%")
-              except: pass
-              return min(s,10), ",".join(flags)
-
-          rows=[]
-          for p in props:
-              # common field guesses; adjust once we see the debug keys
-              street = p.get("streetAddress") or p.get("address") or ""
-              city = p.get("city") or CITY
-              state = p.get("state") or STATE
-              zipc = p.get("zip") or p.get("zipcode") or ""
-              title = ", ".join([x for x in [street, city, state, zipc] if x])
-
-              est_val = p.get("estimatedValue") or p.get("valuation") or None
-              price = as_price(est_val)
-
-              s, flags = score_row(p)
-
-              rows.append({
-                "Date Found": today,
-                "Source": "PropertyReach",
-                "Title": title or "PropertyReach Lead",
-                "URL": f"PR:{p.get('id') or p.get('propertyId') or ''}",
-                "Price": price,
-                "Neighborhood": val(p.get("subdivision") or p.get("neighborhood") or p.get("landUse") or ""),
-                "Address": title,
-                "Description": f"status={val(p.get('listingStatus'))}, DOM={val(p.get('daysOnMarket',0))}",
-                "Score": s,
-                "Flags": flags,
-              })
-
-          # if still zero, push a single debug row so you can see something in Airtable
-          if not rows:
-              rows = [{
-                "Date Found": today,
-                "Source": "PropertyReach",
-                "Title": "PR Debug — No results returned for current filters",
-                "URL": "PR:debug",
-                "Price": "",
-                "Neighborhood": "",
-                "Address": "Portland, OR",
-                "Description": "Try relaxing filters or verify API response shape.",
-                "Score": 0,
-                "Flags": "debug",
+          # If still nothing, insert a richer debug marker row
+          if not all_rows:
+              all_rows = [{
+                  "Date Found": datetime.date.today().isoformat(),
+                  "Source": "PropertyReach [DEBUG]",
+                  "Title": "No results from any variant",
+                  "URL": "PR:debug",
+                  "Price": "",
+                  "Neighborhood": "",
+                  "Address": "Portland, OR",
+                  "Description": "Check logs for [TOP-LEVEL KEYS] and try other filters/endpoints.",
+                  "Score": 0,
+                  "Flags": "debug",
               }]
 
-          # respect MIN_SCORE
-          hot = [r for r in rows if (r["Score"] >= min_score) or r["Title"].startswith("PR Debug")]
-          print(f"[*] Prepared {len(rows)} rows; {len(hot)} pass MIN_SCORE={min_score}")
+          # Apply MIN_SCORE filter but allow debug marker through
+          hot = [r for r in all_rows if (r["Score"] >= MIN_SCORE) or r["Source"].startswith("PropertyReach [DEBUG]")]
+          print(f"Prepared {len(all_rows)} rows; {len(hot)} pass MIN_SCORE={MIN_SCORE}; from variants: {labels}")
 
-          # push to Airtable
+          # Push to Airtable
           at_url = f"https://api.airtable.com/v0/{AT_BASE}/{urllib.parse.quote(AT_TABLE)}"
-          at_headers = {"Authorization": f"Bearer {AT_KEY}", "Content-Type":"application/json"}
+          at_headers = {"Authorization": f"Bearer {AT_KEY}", "Content-Type": "application/json"}
 
           def to_airtable(rec): return {"fields": rec}
 
@@ -192,14 +183,5 @@ jobs:
                   print("Airtable error:", rr.status_code, rr.text); sys.exit(1)
               count += len(payload["records"]); time.sleep(0.25)
 
-          print(f"[✓] Pushed {count} records to Airtable.")
+          print(f"[✓] Pushed {count} rows to Airtable.")
           PY
-
-      - name: Upload debug log (optional placeholder)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: propertyreach-debug
-          path: |
-            # You can add paths to any files you decide to write later.
-          if-no-files-found: ignore
