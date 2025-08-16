@@ -1,0 +1,96 @@
+name: PropertyReach Probe (raw response)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Call PropertyReach with minimal filters and save raw JSON
+        env:
+          PR_API_KEY: ${{ secrets.PR_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, json, requests, sys, textwrap
+
+          key = os.getenv("PR_API_KEY")
+          if not key:
+            print("Missing PR_API_KEY"); sys.exit(1)
+
+          url = "https://api.propertyreach.com/v1/search"
+          headers = {"x-api-key": key, "Content-Type": "application/json"}
+
+          # THREE PROBES: minimal, state-only, and Portland-only
+          probes = [
+            ("A-minimal", {"options": {"limit": 50}}),
+            ("B-state-OR", {"state": "OR", "options": {"limit": 50}}),
+            ("C-portland-OR", {"city": "Portland", "state": "OR", "options": {"limit": 50}}),
+          ]
+
+          combined = {}
+          for label, body in probes:
+            try:
+              r = requests.post(url, headers=headers, data=json.dumps(body), timeout=60)
+              print(f"\n=== {label} ===")
+              print("Status:", r.status_code)
+              try:
+                data = r.json()
+              except Exception:
+                print("Non-JSON:", r.text[:1000])
+                data = {"_non_json": r.text[:1000]}
+              # Guess common containers
+              count = 0
+              items = []
+              if isinstance(data, dict):
+                for k in ("properties","results"):
+                  if isinstance(data.get(k), list):
+                    items = data[k]; break
+                if not items and isinstance(data.get("data"), dict):
+                  for k in ("properties","results"):
+                    if isinstance(data["data"].get(k), list):
+                      items = data["data"][k]; break
+              elif isinstance(data, list):
+                items = data
+              count = len(items)
+              print("Top-level keys:", list(data.keys()) if isinstance(data, dict) else type(data))
+              print("Count:", count)
+              if count:
+                first = items[0]
+                print("First keys:", list(first.keys()))
+                combined[label] = {"count": count, "first_keys": list(first.keys())}
+              else:
+                combined[label] = {"count": 0}
+              # Save raw snapshots per probe
+              with open(f"pr_response_{label}.json", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+              print(f"{label} probe failed:", e)
+              combined[label] = {"error": str(e)}
+
+          # Write a small summary
+          with open("pr_summary.json", "w", encoding="utf-8") as f:
+            json.dump(combined, f, indent=2)
+
+          print("\n=== SUMMARY ===")
+          print(json.dumps(combined, indent=2))
+          PY
+
+      - name: Upload probe artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: propertyreach-probe
+          path: |
+            pr_response_*.json
+            pr_summary.json
