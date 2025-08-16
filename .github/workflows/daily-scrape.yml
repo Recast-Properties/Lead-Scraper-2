@@ -1,21 +1,41 @@
+name: Daily Craigslist Scrape
+
+on:
+  schedule:
+    # Runs every day at 1:10 PM UTC (adjust as needed)
+    - cron: "10 13 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Run scraper with Airtable
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
-          PUSH_ALL: "1"         # set to "1" to push ALL leads instead of only hot
-          MIN_SCORE: "6"        # lower to "4" temporarily if you want more to pass
+          PUSH_ALL: "1"   # for proof-of-life, change back to "0" later
+          MIN_SCORE: "4"  # lower threshold for test, change back to "6" later
         run: |
           python scraper.py
-          echo "--- OUTPUT DIR TREE ---"
-          ls -la
-          echo "--- OUTPUT SUBDIR ---"
-          ls -la output || true
 
-      - name: Upload CSV artifacts
-        if: always()  # try to upload even if previous step had no files
-        uses: actions/upload-artifact@v4
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: craigslist-reports
-          path: output/*.csv
-          if-no-files-found: warn
+          name: scrape-results
+          path: results/*.csv
