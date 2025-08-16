@@ -1,61 +1,57 @@
-name: Airtable Connectivity Test
+name: Airtable Test
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   test-airtable:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install Airtable client
         run: |
-          python -m pip install --upgrade pip
-          pip install requests --no-cache-dir
+          pip install airtable-python-wrapper
 
-      - name: Push 3 test rows to Airtable (inline)
+      - name: Clear table and push test rows
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
         run: |
           python - <<'PY'
-          import os, json, datetime, requests, sys, time
-          API_KEY = os.getenv("AIRTABLE_API_KEY")
+          import os
+          from airtable import Airtable
+
           BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-          TABLE   = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
-          if not API_KEY or not BASE_ID or not TABLE:
-            print("Missing env vars"); sys.exit(1)
-          url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE}"
-          headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-          today = datetime.date.today().isoformat()
-          records = [
-              {"fields": {"Date Found": today, "Source": "test", "Title": "Test Lead A — Fixer in SE Portland",
-                          "URL": "https://example.com/test-a", "Price": "$275,000", "Neighborhood": "SE Portland",
-                          "Address": "123 Test St, Portland, OR", "Description": "Dummy record to verify Airtable connection.",
-                          "Score": 7, "Flags": "as-is/fixer"}},
-              {"fields": {"Date Found": today, "Source": "test", "Title": "Test Lead B — Tenant issues",
-                          "URL": "https://example.com/test-b", "Price": "$315,000", "Neighborhood": "NE Portland",
-                          "Address": "456 Sample Ave, Portland, OR", "Description": "Dummy record to verify Airtable connection.",
-                          "Score": 6, "Flags": "eviction/tenant-wont-pay"}},
-              {"fields": {"Date Found": today, "Source": "test", "Title": "Test Lead C — Vacant & needs work",
-                          "URL": "https://example.com/test-c", "Price": "$199,000", "Neighborhood": "Gresham",
-                          "Address": "789 Demo Blvd, Gresham, OR", "Description": "Dummy record to verify Airtable connection.",
-                          "Score": 8, "Flags": "vacant/needs-work"}},
+          TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
+          API_KEY = os.getenv("AIRTABLE_API_KEY")
+
+          at = Airtable(BASE_ID, TABLE_NAME, API_KEY)
+
+          # Clear existing rows
+          print("Clearing Airtable table...")
+          while True:
+              records = at.get_all(page_size=100)
+              if not records:
+                  break
+              for rec in records:
+                  at.delete(rec['id'])
+          print("All records cleared.")
+
+          # Insert test rows
+          test_data = [
+              {"Name": "Alice Johnson", "Phone": "555-1234", "Address": "123 Main St", "Motivation": "Behind on payments"},
+              {"Name": "Bob Smith", "Phone": "555-5678", "Address": "456 Oak Ave", "Motivation": "Inherited property"},
+              {"Name": "Carol Lee", "Phone": "555-9012", "Address": "789 Pine Rd", "Motivation": "Tired landlord"},
           ]
-          payload = {"records": records, "typecast": True}
-          resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
-          print("Status:", resp.status_code)
-          try:
-              print("Response:", resp.json())
-          except Exception:
-              print("Response text:", resp.text)
-          if resp.status_code >= 300:
-              sys.exit(1)
+          for row in test_data:
+              at.insert(row)
+          print("3 test rows inserted into Airtable.")
           PY
