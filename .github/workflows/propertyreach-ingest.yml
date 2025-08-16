@@ -1,9 +1,9 @@
-name: PropertyReach → Airtable (Portland distressed)
+name: PropertyReach → Airtable (Portland distressed) [DEBUG]
 
 on:
-  workflow_dispatch: {}     # run manually while testing
+  workflow_dispatch: {}
   schedule:
-    - cron: "25 13 * * *"   # daily @ 13:25 UTC (~6:25am PT during DST)
+    - cron: "25 13 * * *"   # ~6:25am PT (DST). Adjust later.
 
 jobs:
   pr-to-airtable:
@@ -17,11 +17,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          pip install requests
+      - name: Install requests
+        run: pip install requests
 
-      - name: Fetch from PropertyReach, score, and push to Airtable
+      - name: Fetch from PropertyReach (debug), score, and push to Airtable
         env:
           PR_API_KEY: ${{ secrets.PR_API_KEY }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
@@ -29,36 +28,33 @@ jobs:
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
           CITY: "Portland"
           STATE: "OR"
-          LIMIT: "50"
-          DAYS_ON_MARKET_MIN: "30"
-          WANT_VACANT: "true"           # change to "false" if you want all
-          WANT_TAX_DELINQUENT: "true"   # change to "false" if you want all
-          WANT_PRICE_REDUCED: "true"    # change to "false" if you want all
-          MIN_SCORE: "6"                # leads with score >= MIN_SCORE go to Airtable
+          LIMIT: "100"
+          DAYS_ON_MARKET_MIN: "0"     # debug: no DOM floor
+          WANT_VACANT: "false"        # debug: do not constrain
+          WANT_TAX_DELINQUENT: "false"
+          WANT_PRICE_REDUCED: "false"
+          MIN_SCORE: "0"              # debug: push everything returned
         run: |
           python - <<'PY'
-          import os, json, requests, datetime, sys, time, math, urllib.parse
+          import os, json, requests, datetime, sys, time, urllib.parse
 
-          # --- Config/env
           PR_KEY = os.getenv("PR_API_KEY")
           CITY = os.getenv("CITY", "Portland")
           STATE = os.getenv("STATE", "OR")
-          LIMIT = int(os.getenv("LIMIT", "50"))
-          dom_min = int(os.getenv("DAYS_ON_MARKET_MIN", "30"))
-          want_vacant = os.getenv("WANT_VACANT", "true").lower() == "true"
-          want_tax = os.getenv("WANT_TAX_DELINQUENT", "true").lower() == "true"
-          want_price_drop = os.getenv("WANT_PRICE_REDUCED", "true").lower() == "true"
-          min_score = int(os.getenv("MIN_SCORE", "6"))
+          LIMIT = int(os.getenv("LIMIT", "100"))
+          dom_min = int(os.getenv("DAYS_ON_MARKET_MIN", "0"))
+          want_vacant = os.getenv("WANT_VACANT","false").lower()=="true"
+          want_tax = os.getenv("WANT_TAX_DELINQUENT","false").lower()=="true"
+          want_price_drop = os.getenv("WANT_PRICE_REDUCED","false").lower()=="true"
+          min_score = int(os.getenv("MIN_SCORE","0"))
 
           AT_KEY = os.getenv("AIRTABLE_API_KEY")
           AT_BASE = os.getenv("AIRTABLE_BASE_ID")
-          AT_TABLE = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
+          AT_TABLE = os.getenv("AIRTABLE_TABLE_NAME","Leads")
 
-          if not (PR_KEY and AT_KEY and AT_BASE and AT_TABLE):
+          if not(PR_KEY and AT_KEY and AT_BASE and AT_TABLE):
               print("Missing one or more secrets (PR_API_KEY / AIRTABLE_*)."); sys.exit(1)
 
-          # --- Call PropertyReach Search API
-          # Docs: POST https://api.propertyreach.com/v1/search with x-api-key header (JSON body). :contentReference[oaicite:1]{index=1}
           pr_url = "https://api.propertyreach.com/v1/search"
           headers = {"x-api-key": PR_KEY, "Content-Type": "application/json"}
 
@@ -67,112 +63,143 @@ jobs:
             "state": STATE,
             "filter": {
               "daysOnMarketMin": dom_min,
+              # only include a filter if True, else omit it
               "vacant": True if want_vacant else None,
               "taxDelinquency": True if want_tax else None,
               "priceReduced": True if want_price_drop else None,
-              # You can add more filters here (ownerOccupied=False, estimatedEquityMin, etc.)
             },
             "options": {"limit": LIMIT}
           }
-
-          # Remove None filters so we don't overconstrain
           body["filter"] = {k:v for k,v in body["filter"].items() if v is not None}
 
+          print("[DEBUG] Request body:")
+          print(json.dumps(body, indent=2))
+
           r = requests.post(pr_url, headers=headers, data=json.dumps(body), timeout=60)
-          if r.status_code >= 300:
-              print("PropertyReach error:", r.status_code, r.text); sys.exit(1)
-          data = r.json()
+          print("[DEBUG] PR status:", r.status_code)
+          try:
+              data = r.json()
+          except Exception:
+              print("[DEBUG] Non-JSON response:", r.text[:1000])
+              sys.exit(1)
 
-          props = data.get("properties", [])
-          print(f"[*] PropertyReach returned {len(props)} properties (limit={LIMIT})")
+          # Inspect top-level keys
+          print("[DEBUG] PR top-level keys:", list(data.keys()))
 
-          # --- Score & map to Airtable schema
-          # Response fields per docs include things like: streetAddress, city, state, zip, estimatedValue, daysOnMarket, listingStatus, id, etc. :contentReference[oaicite:2]{index=2}
+          # Try common containers: 'properties' or 'results'
+          props = []
+          if isinstance(data.get("properties"), list):
+              props = data["properties"]
+          elif isinstance(data.get("results"), list):
+              props = data["results"]
+          elif isinstance(data, list):
+              props = data
+          else:
+              # try nested 'data' key
+              if isinstance(data.get("data"), dict):
+                  if isinstance(data["data"].get("properties"), list):
+                      props = data["data"]["properties"]
+                  elif isinstance(data["data"].get("results"), list):
+                      props = data["data"]["results"]
+
+          print(f"[DEBUG] Count from PR: {len(props)}")
+          if props:
+              print("[DEBUG] First record keys:", list(props[0].keys()))
+
+          # map/score
           today = datetime.date.today().isoformat()
           def val(x, default=""):
               return default if x is None else x
 
-          def score_row(p):
-              s = 0
-              flags = []
-              # Price reduced
-              if val(p.get("listingStatus")) in ("Active","Pending","Contingent") and bool(body["filter"].get("priceReduced", False)):
-                  s += 2; flags.append("price_reduced")
-              # Vacant
-              if p.get("vacant") is True or body["filter"].get("vacant") is True:
-                  s += 2; flags.append("vacant")
-              # Tax delinquent
-              if p.get("taxDelinquency") is True or body["filter"].get("taxDelinquency") is True:
-                  s += 2; flags.append("tax_delinquent")
-              # DOM
+          def as_price(v):
               try:
-                  dom = int(p.get("daysOnMarket") or 0)
-                  if dom >= dom_min: s += 1; flags.append(f"DOM>={dom_min}")
-              except: pass
-              # Equity (if present)
-              try:
-                  eq = float(p.get("estimatedEquityRatio") or 0.0)  # 0..1
-                  if eq >= 0.3: s += 1; flags.append("equity>=30%")
-              except: pass
-              return min(s, 10), ",".join(flags)
+                  return f"${int(float(v)):,}"
+              except:
+                  return ""
 
-          rows = []
-          for p in props:
-              title = f"{val(p.get('streetAddress'))}, {val(p.get('city'))}, {val(p.get('state'))} {val(p.get('zip'))}".strip(", ")
-              price = ""
+          def score_row(p):
+              s=0; flags=[]
+              if p.get("vacant") is True: s+=2; flags.append("vacant")
+              if p.get("taxDelinquency") is True: s+=2; flags.append("tax_delinquent")
+              if p.get("priceReduced") is True: s+=2; flags.append("price_reduced")
               try:
-                  ev = p.get("estimatedValue")
-                  price = f"${int(ev):,}" if isinstance(ev, (int, float)) else ""
+                  dom=int(p.get("daysOnMarket") or 0)
+                  if dom>=dom_min: s+=1; flags.append(f"DOM>={dom_min}")
               except: pass
+              try:
+                  eq=float(p.get("estimatedEquityRatio") or 0.0)
+                  if eq>=0.3: s+=1; flags.append("equity>=30%")
+              except: pass
+              return min(s,10), ",".join(flags)
+
+          rows=[]
+          for p in props:
+              # common field guesses; adjust once we see the debug keys
+              street = p.get("streetAddress") or p.get("address") or ""
+              city = p.get("city") or CITY
+              state = p.get("state") or STATE
+              zipc = p.get("zip") or p.get("zipcode") or ""
+              title = ", ".join([x for x in [street, city, state, zipc] if x])
+
+              est_val = p.get("estimatedValue") or p.get("valuation") or None
+              price = as_price(est_val)
 
               s, flags = score_row(p)
 
               rows.append({
-                  "Date Found": today,
-                  "Source": "PropertyReach",
-                  "Title": title or "PropertyReach Lead",
-                  "URL": f"PR:{p.get('id')}",   # PropertyReach may not include a public URL; track the id
-                  "Price": price,
-                  "Neighborhood": val(p.get("subdivision") or p.get("landUse") or ""),
-                  "Address": title,
-                  "Description": f"status={val(p.get('listingStatus'))}, DOM={val(p.get('daysOnMarket',0))}",
-                  "Score": s,
-                  "Flags": flags,
+                "Date Found": today,
+                "Source": "PropertyReach",
+                "Title": title or "PropertyReach Lead",
+                "URL": f"PR:{p.get('id') or p.get('propertyId') or ''}",
+                "Price": price,
+                "Neighborhood": val(p.get("subdivision") or p.get("neighborhood") or p.get("landUse") or ""),
+                "Address": title,
+                "Description": f"status={val(p.get('listingStatus'))}, DOM={val(p.get('daysOnMarket',0))}",
+                "Score": s,
+                "Flags": flags,
               })
 
-          # Filter by MIN_SCORE
-          hot = [r for r in rows if r["Score"] >= min_score]
-          print(f"[*] Scored {len(rows)} rows; {len(hot)} are >= {min_score}")
+          # if still zero, push a single debug row so you can see something in Airtable
+          if not rows:
+              rows = [{
+                "Date Found": today,
+                "Source": "PropertyReach",
+                "Title": "PR Debug — No results returned for current filters",
+                "URL": "PR:debug",
+                "Price": "",
+                "Neighborhood": "",
+                "Address": "Portland, OR",
+                "Description": "Try relaxing filters or verify API response shape.",
+                "Score": 0,
+                "Flags": "debug",
+              }]
 
-          if not hot:
-              print("[i] No rows met the score threshold. Exiting without Airtable insert.")
-              sys.exit(0)
+          # respect MIN_SCORE
+          hot = [r for r in rows if (r["Score"] >= min_score) or r["Title"].startswith("PR Debug")]
+          print(f"[*] Prepared {len(rows)} rows; {len(hot)} pass MIN_SCORE={min_score}")
 
-          # --- Push to Airtable
+          # push to Airtable
           at_url = f"https://api.airtable.com/v0/{AT_BASE}/{urllib.parse.quote(AT_TABLE)}"
-          at_headers = {"Authorization": f"Bearer {AT_KEY}", "Content-Type": "application/json"}
+          at_headers = {"Authorization": f"Bearer {AT_KEY}", "Content-Type":"application/json"}
 
-          # batch in chunks of 10
-          def to_airtable(rec):
-              return {"fields": rec}
+          def to_airtable(rec): return {"fields": rec}
 
-          count = 0
+          count=0
           for i in range(0, len(hot), 10):
-              payload = {"records": list(map(to_airtable, hot[i:i+10])), "typecast": True}
+              payload = {"records":[to_airtable(x) for x in hot[i:i+10]], "typecast": True}
               rr = requests.post(at_url, headers=at_headers, data=json.dumps(payload), timeout=60)
               if rr.status_code >= 300:
                   print("Airtable error:", rr.status_code, rr.text); sys.exit(1)
-              count += len(payload["records"])
-              time.sleep(0.25)
+              count += len(payload["records"]); time.sleep(0.25)
 
-          print(f"[✓] Pushed {count} hot leads to Airtable.")
+          print(f"[✓] Pushed {count} records to Airtable.")
           PY
 
-      - name: Upload any CSV artifacts (optional placeholder)
+      - name: Upload debug log (optional placeholder)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: propertyreach-run-log
+          name: propertyreach-debug
           path: |
-            # we didn't write CSVs in this job; this is just a placeholder if you add them later
+            # You can add paths to any files you decide to write later.
           if-no-files-found: ignore
