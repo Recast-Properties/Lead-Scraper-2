@@ -1,13 +1,14 @@
 name: PropertyReach → Airtable (Suggestions + Search)
 
 on:
-  workflow_dispatch: {}        # manual trigger during testing
+  workflow_dispatch: {}        # run manually while testing
   schedule:
-    - cron: "20 13 * * *"      # daily @ 13:20 UTC (~6:20am PT during DST)
+    - cron: "20 13 * * *"      # daily @ 13:20 UTC (~6:20am PT)
 
 jobs:
   pr-to-airtable:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -22,45 +23,43 @@ jobs:
 
       - name: Suggestions → Search → Airtable
         env:
-          # --- REQUIRED SECRETS (set in Settings → Secrets and variables → Actions) ---
+          # REQUIRED SECRETS (Settings → Secrets and variables → Actions)
           PR_API_KEY: ${{ secrets.PR_API_KEY }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
 
-          # --- TUNABLES ---
-          QUERY: "Portland OR"    # what to pass to Suggestions
-          FALLBACK_CITY: "Portland"
-          FALLBACK_STATE: "OR"
-          LIMIT: "50"             # PR search page size
-          MIN_SCORE: "6"          # only push leads with score >= MIN_SCORE
-          WANT_VACANT: "false"    # set to "true" to require vacant
+          # TUNABLES
+          QUERY: "Portland OR"     # Suggestions input
+          LIMIT: "50"              # Search page size (max items to fetch)
+          MIN_SCORE: "6"           # Only push leads with Score >= MIN_SCORE
+          WANT_VACANT: "false"     # If "true", require vacant=True in the search filter
           WANT_TAX_DELINQUENT: "false"
           WANT_PRICE_REDUCED: "false"
+
+          # EXTRA FIELDS PUSH (set to "1" **after** you add the columns below in Airtable)
+          EXTRA_FIELDS: "0"
         run: |
           python - <<'PY'
           import os, json, requests, sys, time, datetime, urllib.parse
 
-          # --- Env / Secrets
+          # --- env
           PR_KEY = os.getenv("PR_API_KEY")
           AT_KEY = os.getenv("AIRTABLE_API_KEY")
           AT_BASE = os.getenv("AIRTABLE_BASE_ID")
           AT_TABLE = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
-
           QUERY = os.getenv("QUERY", "Portland OR")
-          FALLBACK_CITY = os.getenv("FALLBACK_CITY", "Portland")
-          FALLBACK_STATE = os.getenv("FALLBACK_STATE", "OR")
           LIMIT = int(os.getenv("LIMIT", "50"))
           MIN_SCORE = int(os.getenv("MIN_SCORE", "6"))
           WANT_VAC = os.getenv("WANT_VACANT", "false").lower() == "true"
           WANT_TAX = os.getenv("WANT_TAX_DELINQUENT", "false").lower() == "true"
           WANT_PRICE = os.getenv("WANT_PRICE_REDUCED", "false").lower() == "true"
+          EXTRA = os.getenv("EXTRA_FIELDS", "0") == "1"
 
           if not all([PR_KEY, AT_KEY, AT_BASE, AT_TABLE]):
               print("Missing one or more secrets (PR_API_KEY / AIRTABLE_*)")
               sys.exit(1)
 
-          # --- Helpers
           def v(x, d=""):
               return d if x is None else x
 
@@ -70,27 +69,25 @@ jobs:
               except:
                   return ""
 
-          def post_json(url, key, body, timeout=60):
-              r = requests.post(url, headers={"x-api-key": key, "Content-Type":"application/json"},
-                                data=json.dumps(body), timeout=timeout)
-              return r
-
           def get_json(url, key, params=None, timeout=30):
-              r = requests.get(url, headers={"x-api-key": key}, params=params or {}, timeout=timeout)
-              return r
+              return requests.get(url, headers={"x-api-key": key}, params=params or {}, timeout=timeout)
 
-          # --- 1) Suggestions (GET) to normalize the search target
+          def post_json(url, key, body, timeout=60):
+              return requests.post(url, headers={"x-api-key": key, "Content-Type":"application/json"},
+                                   data=json.dumps(body), timeout=timeout)
+
+          # 1) Suggestions (GET) to normalize the target
           sugg_url = "https://api.propertyreach.com/v1/suggestions"
           print(f"[Suggestions] GET {sugg_url} query={QUERY!r}")
           rs = get_json(sugg_url, PR_KEY, params={"query": QUERY, "limit": 5})
           print("[Suggestions] Status:", rs.status_code)
-          target = {"city": FALLBACK_CITY, "state": FALLBACK_STATE}
+
+          target = {"city": "Portland", "state": "OR"}  # fallback
           if rs.status_code == 200:
               try:
                   sdata = rs.json()
               except Exception:
                   sdata = {}
-              # Try common layouts: {'suggestions':[...]} or {'results':[...]}
               candidates = []
               if isinstance(sdata, dict):
                   if isinstance(sdata.get("suggestions"), list):
@@ -99,17 +96,13 @@ jobs:
                       candidates = sdata["results"]
               elif isinstance(sdata, list):
                   candidates = sdata
-
               print(f"[Suggestions] Count: {len(candidates)}")
               if candidates:
                   first = candidates[0]
-                  # Prefer city/state if present; otherwise use county/zip fallback
-                  city = first.get("city") or None
-                  state = first.get("state") or None
-                  county = first.get("county") or None
-                  zipc = first.get("zip") or first.get("zipcode") or None
-
-                  # Build target in priority order
+                  city = first.get("city")
+                  state = first.get("state")
+                  county = first.get("county")
+                  zipc = first.get("zip") or first.get("zipcode")
                   if city and state:
                       target = {"city": city, "state": state}
                   elif county and state:
@@ -120,21 +113,15 @@ jobs:
           else:
               print("[Suggestions] Non-200, using fallback target:", target)
 
-          # --- 2) Search (POST) using target and (optional) simple filters
+          # 2) Search (POST) with light filters
           search_url = "https://api.propertyreach.com/v1/search"
           filt = {"daysOnMarketMin": 0}
-          if WANT_VAC: filt["vacant"] = True
-          if WANT_TAX: filt["taxDelinquency"] = True
-          if WANT_PRICE: filt["priceReduced"] = True
-          # strip None
+          if WANT_VAC:  filt["vacant"] = True
+          if WANT_TAX:  filt["taxDelinquency"] = True
+          if WANT_PRICE:filt["priceReduced"] = True
           filt = {k: v for k, v in filt.items() if v is not None}
 
-          body = {
-              "target": target,          # e.g., {"city":"Portland","state":"OR"}
-              "filter": filt,            # keep light; we'll tighten after we confirm shape
-              "options": {"limit": LIMIT}
-          }
-
+          body = {"target": target, "filter": filt, "options": {"limit": LIMIT}}
           print(f"[Search] POST {search_url}")
           print("[Search] Body:", json.dumps(body)[:400])
           rr = post_json(search_url, PR_KEY, body)
@@ -147,7 +134,6 @@ jobs:
               except Exception:
                   print("[Search] Non-JSON:", rr.text[:1200])
                   j = {}
-              # Accept common containers
               if isinstance(j, dict):
                   for key in ("properties","results"):
                       if isinstance(j.get(key), list):
@@ -169,38 +155,49 @@ jobs:
               except Exception:
                   pass
 
-          # --- 3) Map + Score
-          def score(p, dom_floor=0):
+          # 3) Scoring tuned to your payload fields
+          def score(p):
               s, flags = 0, []
-              # common boolean signals if present
-              if p.get("vacant") is True: s+=2; flags.append("vacant")
-              if p.get("taxDelinquency") is True: s+=2; flags.append("tax_delinquent")
-              if p.get("priceReduced") is True: s+=2; flags.append("price_reduced")
-              # DOM
+              if p.get("vacant") is True:
+                  s += 3; flags.append("vacant")
+              if p.get("ownerOccupied") is False:
+                  s += 2; flags.append("non_owner_occ")
               try:
                   dom = int(p.get("daysOnMarket") or 0)
-                  if dom >= dom_floor: s+=1; flags.append(f"DOM>={dom_floor}")
-              except: pass
-              # Equity ratio
+                  if dom >= 120:
+                      s += 3; flags.append("DOM>=120")
+                  elif dom >= 90:
+                      s += 3; flags.append("DOM>=90")
+                  elif dom >= 60:
+                      s += 2; flags.append("DOM>=60")
+                  elif dom >= 30:
+                      s += 1; flags.append("DOM>=30")
+              except:
+                  pass
+              if p.get("lastCashSale") is True:
+                  s += 1; flags.append("last_cash_sale")
               try:
-                  eq = float(p.get("estimatedEquityRatio") or 0.0)
-                  if eq >= 0.3: s+=1; flags.append("equity>=30%")
-              except: pass
-              return min(s,10), ",".join(flags)
+                  pulse = float(p.get("propPulseScore") or 0)
+                  if pulse <= 25:
+                      s += 1; flags.append("low_pulse")
+              except:
+                  pass
+              return min(s, 10), ",".join(flags)
 
+          # 4) Map to Airtable
           today = datetime.date.today().isoformat()
-          rows = []
-          for p in items:
+          def make_row(p):
               street = p.get("streetAddress") or p.get("address") or ""
               city = p.get("city") or target.get("city") or ""
               state = p.get("state") or target.get("state") or ""
               zipc = p.get("zip") or p.get("zipcode") or ""
               title = ", ".join([x for x in [street, city, state, zipc] if x])
 
-              price = as_price(p.get("estimatedValue") or p.get("valuation"))
-              s, flags = score(p, dom_floor=0)
+              price = as_price(p.get("estimatedValue") or p.get("lastSaleAmount"))
+              s, flags = score(p)
 
-              rows.append({
+              base = {
+                  # your existing schema (safe)
                   "Date Found": today,
                   "Source": "PropertyReach",
                   "Title": title or "PropertyReach Lead",
@@ -208,12 +205,45 @@ jobs:
                   "Price": price,
                   "Neighborhood": v(p.get("subdivision") or p.get("neighborhood") or p.get("landUse") or ""),
                   "Address": title,
-                  "Description": f"status={v(p.get('listingStatus'))}, DOM={v(p.get('daysOnMarket',0))}",
+                  "Description": f"type={v(p.get('propertyType'))}, DOM={v(p.get('daysOnMarket',0))}",
                   "Score": s,
                   "Flags": flags,
-              })
+              }
 
-          # If still nothing, add a single debug marker row to prove end-to-end flow
+              if not EXTRA:
+                  return base
+
+              # optional enrichment (ONLY if you created the fields in Airtable)
+              extra = {
+                  "PR ID": v(p.get("id") or p.get("propertyId") or ""),
+                  "Zip": v(zipc),
+                  "Estimated Value": p.get("estimatedValue"),
+                  "Price per Sq Ft": p.get("pricePerSquareFoot"),
+                  "Bedrooms": p.get("bedrooms"),
+                  "Bathrooms": p.get("bathrooms"),
+                  "Year Built": p.get("yearBuilt"),
+                  "Square Feet": p.get("squareFeet"),
+                  "Lot Sq Ft": p.get("lotSquareFeet"),
+                  "Property Type": v(p.get("propertyType")),
+                  "On Market": bool(p.get("onMarket")),
+                  "Owner Occupied": (None if p.get("ownerOccupied") is None else bool(p.get("ownerOccupied"))),
+                  "Vacant": (None if p.get("vacant") is None else bool(p.get("vacant"))),
+                  "Days on Market": p.get("daysOnMarket"),
+                  "PropPulseScore": p.get("propPulseScore"),
+                  "Last Sale Date": v(p.get("lastSaleDate")),
+                  "Last Sale Amount": p.get("lastSaleAmount"),
+                  "Last Cash Sale": bool(p.get("lastCashSale")) if p.get("lastCashSale") is not None else None,
+                  "Latitude": p.get("latitude"),
+                  "Longitude": p.get("longitude"),
+                  "Photo URL": v(p.get("photoUrl")),
+              }
+              # merge
+              base.update({k: v for k, v in extra.items() if v is not None})
+              return base
+
+          rows = [make_row(p) for p in items]
+
+          # Fallback debug row if nothing mapped
           if not rows:
               rows = [{
                   "Date Found": today,
@@ -222,16 +252,16 @@ jobs:
                   "URL": "PR:debug",
                   "Price": "",
                   "Neighborhood": "",
-                  "Address": f"{target}",
-                  "Description": "Check logs for Suggestion and Search status; verify plan/key permissions.",
+                  "Address": json.dumps(target),
+                  "Description": "Check Search keys & plan permissions.",
                   "Score": 0,
                   "Flags": "debug"
               }]
 
-          hot = [r for r in rows if (r["Score"] >= MIN_SCORE) or r["Source"].startswith("PropertyReach [DEBUG]")]
+          hot = [r for r in rows if (r.get("Score", 0) >= MIN_SCORE) or r["Source"].startswith("PropertyReach [DEBUG]")]
           print(f"[Map] Prepared {len(rows)} rows; sending {len(hot)} rows to Airtable (MIN_SCORE={MIN_SCORE})")
 
-          # --- 4) Push to Airtable
+          # 5) Push to Airtable
           at_url = f"https://api.airtable.com/v0/{AT_BASE}/{urllib.parse.quote(AT_TABLE)}"
           at_headers = {"Authorization": f"Bearer {AT_KEY}", "Content-Type":"application/json"}
           def to_airtable(rec): return {"fields": rec}
@@ -248,12 +278,3 @@ jobs:
 
           print(f"[✓] Airtable push complete: {pushed} records")
           PY
-
-      - name: Upload debug artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-ingest-debug
-          path: |
-            # (no files written; this is a placeholder if you add dumps later)
-          if-no-files-found: ignore
