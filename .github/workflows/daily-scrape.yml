@@ -3,7 +3,7 @@
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
-          PUSH_ALL: "0"         # set to "1" to push ALL leads instead of only hot
+          PUSH_ALL: "1"         # set to "1" to push ALL leads instead of only hot
           MIN_SCORE: "6"        # lower to "4" temporarily if you want more to pass
         run: |
           python scraper.py
