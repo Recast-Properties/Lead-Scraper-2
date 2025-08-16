@@ -1,7 +1,6 @@
 name: Airtable Connectivity Test
-
 on:
-  workflow_dispatch: {}  # manual trigger
+  workflow_dispatch: {}
 
 jobs:
   test-airtable:
@@ -18,11 +17,45 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt --no-cache-dir || pip install requests
+          pip install requests --no-cache-dir
 
-      - name: Push 3 test rows to Airtable
+      - name: Push 3 test rows to Airtable (inline)
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
-        run: python airtable_test.py
+        run: |
+          python - <<'PY'
+          import os, json, datetime, requests, sys, time
+          API_KEY = os.getenv("AIRTABLE_API_KEY")
+          BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+          TABLE   = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
+          if not API_KEY or not BASE_ID or not TABLE:
+            print("Missing env vars"); sys.exit(1)
+          url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE}"
+          headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+          today = datetime.date.today().isoformat()
+          records = [
+              {"fields": {"Date Found": today, "Source": "test", "Title": "Test Lead A — Fixer in SE Portland",
+                          "URL": "https://example.com/test-a", "Price": "$275,000", "Neighborhood": "SE Portland",
+                          "Address": "123 Test St, Portland, OR", "Description": "Dummy record to verify Airtable connection.",
+                          "Score": 7, "Flags": "as-is/fixer"}},
+              {"fields": {"Date Found": today, "Source": "test", "Title": "Test Lead B — Tenant issues",
+                          "URL": "https://example.com/test-b", "Price": "$315,000", "Neighborhood": "NE Portland",
+                          "Address": "456 Sample Ave, Portland, OR", "Description": "Dummy record to verify Airtable connection.",
+                          "Score": 6, "Flags": "eviction/tenant-wont-pay"}},
+              {"fields": {"Date Found": today, "Source": "test", "Title": "Test Lead C — Vacant & needs work",
+                          "URL": "https://example.com/test-c", "Price": "$199,000", "Neighborhood": "Gresham",
+                          "Address": "789 Demo Blvd, Gresham, OR", "Description": "Dummy record to verify Airtable connection.",
+                          "Score": 8, "Flags": "vacant/needs-work"}},
+          ]
+          payload = {"records": records, "typecast": True}
+          resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+          print("Status:", resp.status_code)
+          try:
+              print("Response:", resp.json())
+          except Exception:
+              print("Response text:", resp.text)
+          if resp.status_code >= 300:
+              sys.exit(1)
+          PY
