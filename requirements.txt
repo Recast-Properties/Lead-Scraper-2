@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+feedparser
+python-dateutil
+python-dotenv
+airtable-python-wrapper
