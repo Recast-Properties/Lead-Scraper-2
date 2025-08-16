@@ -1,57 +1,111 @@
-name: Airtable Test
-
+name: Airtable Connectivity Test
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   test-airtable:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Airtable client
-        run: |
-          pip install airtable-python-wrapper
-
-      - name: Clear table and push test rows
+      - name: Push 3 test rows (matches your Leads schema)
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          # Set CLEAR_ALL to "1" if you want to wipe the table before inserting test rows
+          CLEAR_ALL: "0"
+          # Set INCLUDE_FLAGS to "1" **only if** you created a "Flags" field in Airtable
+          INCLUDE_FLAGS: "0"
         run: |
           python - <<'PY'
-          import os
-          from airtable import Airtable
+          import os, sys, time, json, datetime, requests, urllib.parse
 
-          BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-          TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
           API_KEY = os.getenv("AIRTABLE_API_KEY")
+          BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+          TABLE   = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
+          CLEAR   = os.getenv("CLEAR_ALL", "0") == "1"
+          INCFLAG = os.getenv("INCLUDE_FLAGS", "0") == "1"
 
-          at = Airtable(BASE_ID, TABLE_NAME, API_KEY)
+          if not (API_KEY and BASE_ID and TABLE):
+            print("Missing AIRTABLE_API_KEY / AIRTABLE_BASE_ID / AIRTABLE_TABLE_NAME"); sys.exit(1)
 
-          # Clear existing rows
-          print("Clearing Airtable table...")
-          while True:
-              records = at.get_all(page_size=100)
-              if not records:
-                  break
-              for rec in records:
-                  at.delete(rec['id'])
-          print("All records cleared.")
+          base_url = f"https://api.airtable.com/v0/{BASE_ID}/{urllib.parse.quote(TABLE)}"
+          headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
-          # Insert test rows
-          test_data = [
-              {"Name": "Alice Johnson", "Phone": "555-1234", "Address": "123 Main St", "Motivation": "Behind on payments"},
-              {"Name": "Bob Smith", "Phone": "555-5678", "Address": "456 Oak Ave", "Motivation": "Inherited property"},
-              {"Name": "Carol Lee", "Phone": "555-9012", "Address": "789 Pine Rd", "Motivation": "Tired landlord"},
+          def list_ids():
+            ids = []
+            url = base_url
+            while True:
+              r = requests.get(url, headers=headers, timeout=30)
+              if r.status_code >= 300:
+                print("List error:", r.status_code, r.text); sys.exit(1)
+              data = r.json()
+              ids.extend([rec["id"] for rec in data.get("records", [])])
+              offset = data.get("offset")
+              if not offset: break
+              url = f"{base_url}?offset={offset}"
+            return ids
+
+          def delete_batch(ids):
+            if not ids: return
+            # DELETE /v0/{base}/{table}?records[]=rec1&records[]=rec2 ...
+            params = "&".join(f"records[]={urllib.parse.quote(i)}" for i in ids)
+            url = f"{base_url}?{params}"
+            r = requests.delete(url, headers=headers, timeout=30)
+            if r.status_code >= 300:
+              print("Delete error:", r.status_code, r.text); sys.exit(1)
+
+          if CLEAR:
+            print("Clearing Airtable table...")
+            ids = list_ids()
+            for i in range(0, len(ids), 10):
+              delete_batch(ids[i:i+10])
+              time.sleep(0.2)
+            print("All records cleared.")
+
+          today = datetime.date.today().isoformat()
+          def rec(title, url, price, hood, addr, desc, score, flags=None):
+            fields = {
+              "Date Found": today,
+              "Source": "test",
+              "Title": title,
+              "URL": url,
+              "Price": price,
+              "Neighborhood": hood,
+              "Address": addr,
+              "Description": desc,
+              "Score": score,
+            }
+            if INCFLAG and flags is not None:
+              fields["Flags"] = flags
+            return {"fields": fields}
+
+          records = [
+            rec("Test Lead A — Fixer in SE Portland", "https://example.com/test-a", "$275,000", "SE Portland",
+                "123 Test St, Portland, OR", "Dummy record to verify Airtable connection.", 7,
+                "as-is/fixer"),
+            rec("Test Lead B — Tenant issues", "https://example.com/test-b", "$315,000", "NE Portland",
+                "456 Sample Ave, Portland, OR", "Dummy record to verify Airtable connection.", 6,
+                "eviction/tenant-wont-pay"),
+            rec("Test Lead C — Vacant & needs work", "https://example.com/test-c", "$199,000", "Gresham",
+                "789 Demo Blvd, Gresham, OR", "Dummy record to verify Airtable connection.", 8,
+                "vacant/needs-work"),
           ]
-          for row in test_data:
-              at.insert(row)
-          print("3 test rows inserted into Airtable.")
+
+          payload = {"records": records, "typecast": True}
+          r = requests.post(base_url, headers=headers, data=json.dumps(payload), timeout=30)
+          print("Insert status:", r.status_code)
+          try:
+            print("Response:", r.json())
+          except Exception:
+            print("Response text:", r.text)
+
+          sys.exit(0 if r.status_code < 300 else 1)
           PY
