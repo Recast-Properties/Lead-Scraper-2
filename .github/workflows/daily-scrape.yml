@@ -2,8 +2,8 @@ name: Daily Craigslist scrape
 
 on:
   schedule:
-    - cron: "10 13 * * *"   # 6:10 AM Portland time (13:10 UTC during DST)
-  workflow_dispatch: {}      # lets you run it manually from the Actions tab
+    - cron: "10 13 * * *"
+  workflow_dispatch: {}
 
 jobs:
   run-scraper:
@@ -12,17 +12,43 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      - name: Show repo tree (debug)
+        run: ls -R
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      - name: Locate project dir
+        id: locate
+        shell: bash
+        run: |
+          set -e
+          # Find the first main.py within 3 levels
+          FILE_PATH=$(find . -maxdepth 3 -type f -name "main.py" | head -n 1)
+          if [ -z "$FILE_PATH" ]; then
+            echo "No main.py found"; exit 1
+          fi
+          DIR_PATH=$(dirname "$FILE_PATH")
+          echo "dir=$DIR_PATH" >> "$GITHUB_OUTPUT"
+          echo "Found main.py at: $FILE_PATH"
+
       - name: Install dependencies
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.dir }}
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt --no-cache-dir
+          else
+            echo "No requirements.txt in $PWD; installing defaults"
+            pip install requests beautifulsoup4 feedparser python-dateutil python-dotenv airtable-python-wrapper
+          fi
 
       - name: Run scraper with Airtable
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.dir }}
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
@@ -33,4 +59,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: craigslist-reports
-          path: output/*.csv
+          path: |
+            ${{ steps.locate.outputs.dir }}/output/*.csv
