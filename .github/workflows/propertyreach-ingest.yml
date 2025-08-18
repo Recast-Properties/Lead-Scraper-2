@@ -2,8 +2,8 @@ name: PropertyReach → Airtable (Suggestions + Search)
 
 on:
   workflow_dispatch: {}        # run manually while testing
-  schedule:
-    - cron: "20 13 * * *"      # daily @ 13:20 UTC (~6:20am PT)
+  # schedule:
+  #  - cron: "20 13 * * *"      # daily @ 13:20 UTC (~6:20am PT)
 
 jobs:
   pr-to-airtable:
